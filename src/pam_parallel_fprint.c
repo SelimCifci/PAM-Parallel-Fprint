@@ -3,6 +3,7 @@
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <unistd.h>
 
 // Fprint related headers
@@ -166,8 +167,11 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     pthread_join(pw_thread, NULL);
     tcflush(STDIN_FILENO, TCIFLUSH);
 
-    // Return PAM_SUCCESS to authenticate successfully
-    if (data.result == 1) return PAM_SUCCESS;
+    // Return PAM_SUCCESS to authenticate successfully (fingeprint match)
+    if (data.result == 1) {
+        printf("\n");
+        return PAM_SUCCESS;
+    }
     // Return PAM_IGNORE so pam_unix.so can take over password authentication
     else if (data.result == 2) return PAM_IGNORE;
 
