@@ -72,7 +72,6 @@ retry:
                            "s", data->user);
     if (r < 0) {
         if (sd_bus_error_has_name(&error, "net.reactivated.Fprint.Error.AlreadyInUse")) {
-            printf("Device is currently in use, retrying...\n");
             usleep(1000000); // Wait 1s before retrying
             goto retry;
         }
