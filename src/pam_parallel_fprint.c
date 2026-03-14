@@ -133,9 +133,10 @@ void* check_password(void* ptr) {
     int rc = pam_get_authtok(data->pamh, PAM_AUTHTOK, &password, "Fingeprint or Password: ");
 
     // Set password for pam_unix.so
-    pam_set_item(data->pamh, PAM_AUTHTOK, password);
-
-    data->result = (rc == PAM_SUCCESS) ? 2 : 0;
+    if (rc == PAM_SUCCESS) {
+        pam_set_item(data->pamh, PAM_AUTHTOK, password);
+        data->result = 2;
+    }
     data->done = 1;
 
     return NULL;
