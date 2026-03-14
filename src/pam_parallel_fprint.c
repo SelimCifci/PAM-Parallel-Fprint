@@ -170,7 +170,9 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
 
     // Return PAM_SUCCESS to authenticate successfully (fingeprint match)
     if (data.result == 1) {
-        printf("\n");
+        // Add newline only when running in a terminal to avoid messing up GUI prompts
+        if (isatty(1))
+            printf("\n");
         return PAM_SUCCESS;
     }
     // Return PAM_IGNORE so pam_unix.so can take over password authentication
