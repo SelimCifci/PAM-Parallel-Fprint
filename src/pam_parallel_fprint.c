@@ -147,7 +147,8 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     // -----INITIALIZATION-----
     // Get user
     const char *user;
-    if (pam_get_user(pamh, &user, NULL) != PAM_SUCCESS) return PAM_USER_UNKNOWN;
+    if (pam_get_user(pamh, &user, NULL) != PAM_SUCCESS)
+        return PAM_USER_UNKNOWN;
 
     // Create shared data structure for threads
     auth_data data = {pamh, user, 0, 0 };
@@ -158,25 +159,27 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     pthread_create(&pw_thread, NULL, check_password, &data);
 
     // Wait for either thread to complete authentication
-    while (!data.done) {
+    while (!data.done)
         usleep(50000); // Sleep for 50ms
-    }
 
     // -----Clean up-----
     pthread_cancel(pw_thread);
     pthread_join(fp_thread, NULL);
     pthread_join(pw_thread, NULL);
-    tcflush(STDIN_FILENO, TCIFLUSH);
+    // Run terminal commands only if we're in a terminal to avoid messing with GUI prompts
+    if (isatty(1))
+    {
+        printf("\n");
+        tcflush(STDIN_FILENO, TCIFLUSH);
+    }
 
     // Return PAM_SUCCESS to authenticate successfully (fingeprint match)
-    if (data.result == 1) {
-        // Add newline only when running in a terminal to avoid messing up GUI prompts
-        if (isatty(1))
-            printf("\n");
+    if (data.result == 1)
         return PAM_SUCCESS;
-    }
+
     // Return PAM_IGNORE so pam_unix.so can take over password authentication
-    else if (data.result == 2) return PAM_IGNORE;
+    else if (data.result == 2)
+        return PAM_IGNORE;
 
     // FAIL SAFE
     return PAM_AUTH_ERR;
