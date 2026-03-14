@@ -144,6 +144,8 @@ void* check_password(void* ptr) {
 
 // Custom stuff
 PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, const char **argv) {
+    int term = isatty(0);
+
     // -----INITIALIZATION-----
     // Get user
     const char *user;
@@ -166,16 +168,15 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     pthread_cancel(pw_thread);
     pthread_join(fp_thread, NULL);
     pthread_join(pw_thread, NULL);
-    // Run terminal commands only if we're in a terminal to avoid messing with GUI prompts
-    if (isatty(1))
-    {
-        printf("\n");
+    if (term)
         tcflush(STDIN_FILENO, TCIFLUSH);
-    }
 
     // Return PAM_SUCCESS to authenticate successfully (fingeprint match)
-    if (data.result == 1)
+    if (data.result == 1) {
+        if (term)
+            printf("\n");
         return PAM_SUCCESS;
+    }
 
     // Return PAM_IGNORE so pam_unix.so can take over password authentication
     else if (data.result == 2)
