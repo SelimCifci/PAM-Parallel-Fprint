@@ -1,4 +1,3 @@
-// PAM related headers
 #include <security/_pam_types.h>
 #include <security/pam_modules.h>
 #include <security/pam_ext.h>
@@ -6,10 +5,8 @@
 #include <stdio.h>
 #include <unistd.h>
 
-// Fprint related headers
 #include <systemd/sd-bus.h>
 
-// Misc headers
 #include <termios.h>
 
 // Structure to pass data to threads
@@ -164,7 +161,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     while (!data.done)
         usleep(50000); // Sleep for 50ms
 
-    // -----Clean up-----
+    // -----CLEAN UP-----
     pthread_cancel(pw_thread);
     pthread_join(fp_thread, NULL);
     pthread_join(pw_thread, NULL);
