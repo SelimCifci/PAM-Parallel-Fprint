@@ -150,7 +150,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
         return PAM_USER_UNKNOWN;
 
     // Create shared data structure for threads
-    auth_data data = {pamh, user, 0, 0 };
+    auth_data data = { pamh, user, 0, 0 };
     pthread_t fp_thread, pw_thread;
     
     // -----THREAD CREATION-----
