@@ -1,4 +1,3 @@
-# Maintainer: cifciselimhasan@gmail.com
 pkgname=pam-parallel-fprint
 pkgver=1.0.0
 pkgrel=1
