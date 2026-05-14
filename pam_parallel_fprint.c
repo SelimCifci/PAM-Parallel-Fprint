@@ -127,7 +127,7 @@ void* check_password(void* ptr) {
 
     // Password prompt
     const char *password;
-    int rc = pam_get_authtok(data->pamh, PAM_AUTHTOK, &password, "Fingeprint or Password: ");
+    int rc = pam_get_authtok(data->pamh, PAM_AUTHTOK, &password, "Fingerprint or Password: ");
 
     // Set password for pam_unix.so
     if (rc == PAM_SUCCESS) {
@@ -168,7 +168,7 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     if (term)
         tcflush(STDIN_FILENO, TCIFLUSH);
 
-    // Return PAM_SUCCESS to authenticate successfully (fingeprint match)
+    // Return PAM_SUCCESS to authenticate successfully (fingerprint match)
     if (data.result == 1) {
         if (term)
             printf("\n");
