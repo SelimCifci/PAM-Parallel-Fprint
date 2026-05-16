@@ -1,8 +1,12 @@
 # Maintainer: Selim Cifci <cifciselimhasan@gmail.com>
 pkgname=pam-parallel-fprint
-pkgver=1.0.0
+pkgver=r18.d324d2d
+pkgver() {
+  cd "$srcdir/PAM-Parallel-Fprint"
+  printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
 pkgrel=1
-pkgdesc="PAM module that allows for fingerprint and password auth at the same time"
+pkgdesc="PAM module allowing for fprintd and password authentication in parallel"
 arch=('x86_64')
 url="https://github.com/SelimCifci/PAM-Parallel-Fprint"
 license=('GPL3')
