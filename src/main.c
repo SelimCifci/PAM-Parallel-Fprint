@@ -35,6 +35,7 @@ int fprint_match(sd_bus_message *m, void *args, sd_bus_error *ret_error) {
 void *check_fingerprint(void* ptr) {
     auth_data *data = (auth_data*)ptr;
 
+retry:
     sd_bus *bus = NULL;
     sd_bus_error error = SD_BUS_ERROR_NULL;
     sd_bus_message *msg = NULL;
@@ -56,7 +57,6 @@ void *check_fingerprint(void* ptr) {
     if (r < 0) goto cleanup;
     sd_bus_message_read(msg, "o", &device_path);
 
-retry_claiming:
     // Claim device
     r = sd_bus_call_method(
         bus,
@@ -71,7 +71,7 @@ retry_claiming:
     if (r < 0) {
         if (sd_bus_error_has_name(&error, "net.reactivated.Fprint.Error.AlreadyInUse")) {
             usleep(1000000); // Wait 1s before retrying
-            goto retry_claiming;
+            goto retry;
         }
 
         goto cleanup;
