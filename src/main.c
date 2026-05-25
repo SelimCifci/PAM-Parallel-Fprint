@@ -26,8 +26,10 @@ int fprint_match(sd_bus_message *m, void *args, sd_bus_error *ret_error) {
     if (r < 0) 
         return 0;
     
-    atomic_store(&data->result, 1);
-    atomic_store(&data->done, true);
+    if (strcmp(result, "verify-match") == 0) {
+        atomic_store(&data->result, 1);
+        atomic_store(&data->done, true);
+    }
 
     return 0;
 }
@@ -39,6 +41,7 @@ retry:
     sd_bus *bus = NULL;
     sd_bus_error error = SD_BUS_ERROR_NULL;
     sd_bus_message *msg = NULL;
+    sd_bus_slot *slot = NULL;
     char *device_path = NULL;
 
     // Connect to sd-bus
@@ -71,6 +74,9 @@ retry:
     if (r < 0) {
         if (sd_bus_error_has_name(&error, "net.reactivated.Fprint.Error.AlreadyInUse")) {
             usleep(1000000); // Wait 1s before retrying
+            sd_bus_error_free(&error);
+            sd_bus_message_unref(msg);
+            sd_bus_unref(bus);
             goto retry;
         }
 
@@ -91,7 +97,6 @@ retry:
     if (r < 0) goto cleanup;
 
     // Start listening for verification result
-    sd_bus_slot *slot = NULL;
     sd_bus_add_match(
         bus,
         &slot,
@@ -108,9 +113,6 @@ retry:
         }
     }
 
-    if (slot)
-        sd_bus_slot_unref(slot);
-
 cleanup:
     // Release and close
     if (device_path) {
@@ -126,6 +128,7 @@ cleanup:
     }
     sd_bus_error_free(&error);
     sd_bus_message_unref(msg);
+    sd_bus_slot_unref(slot);
     sd_bus_unref(bus);
 
     return NULL;
