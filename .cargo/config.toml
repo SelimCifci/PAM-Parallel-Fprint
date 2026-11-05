@@ -1,0 +1,7 @@
+[alias]
+xtask = "run --bin xtask --"
+install-pam = "run --bin xtask -- install"
+install-module = "run --bin xtask -- install"
+uninstall-pam = "run --bin xtask -- uninstall"
+status-pam = "run --bin xtask -- status"
+

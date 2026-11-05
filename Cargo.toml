@@ -1,0 +1,14 @@
+[package]
+name = "parallel_fprint"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pam = { version = "0.8.0", default-features = false, features = ["module", "client"] }
+zbus = "6.2.1"
+tokio = { version = "1", features = ["rt", "macros", "sync", "time"] }
+futures-util = "0.3"
+libc = "0.2"
