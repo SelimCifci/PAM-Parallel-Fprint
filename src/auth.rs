@@ -28,10 +28,9 @@ fn handle_prompt_result(
                     return PamReturnCode::Auth_Err;
                 }
             }
-            // Return Ignore so pam_unix try_first_pass authenticates the token
             PamReturnCode::Ignore
         }
-        PromptResult::Cancelled | PromptResult::Error => {
+        _ => {
             log_debug(debug, "Password prompt cancelled or encountered error");
             PamReturnCode::Auth_Err
         }
@@ -72,19 +71,13 @@ pub fn authenticate_impl(
     }
     let conv_ptr = conv_item as *const pam::ffi::pam_conv;
 
-    // 3. Initialize Tokio runtime for async D-Bus operations
-    let rt = match tokio::runtime::Builder::new_current_thread()
+    // 3. Initialize Tokio runtime
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-    {
-        Ok(r) => r,
-        Err(e) => {
-            log_debug(
-                config.debug,
-                &format!("Failed to build Tokio runtime: {}", e),
-            );
-            return PamReturnCode::Ignore;
-        }
+    else {
+        log_debug(config.debug, "Failed to build Tokio runtime");
+        return PamReturnCode::Ignore;
     };
 
     // 4. Pre-check: verify fingerprint device and enrolled prints for this user
@@ -100,13 +93,11 @@ pub fn authenticate_impl(
             }
         };
 
-    // 5. Spawn PAM password prompt in dedicated background thread
-    let prompt_handle = match spawn_prompt_thread(conv_ptr, config.prompt.clone(), config.debug) {
-        Some(h) => h,
-        None => {
-            log_debug(config.debug, "Failed to spawn prompt thread");
-            return PamReturnCode::Conv_Err;
-        }
+    // 5. Spawn PAM password prompt in background thread
+    let Some(prompt_handle) = spawn_prompt_thread(conv_ptr, config.prompt.clone(), config.debug)
+    else {
+        log_debug(config.debug, "Failed to spawn prompt thread");
+        return PamReturnCode::Conv_Err;
     };
 
     // 6. Concurrently race fprintd and password prompt
@@ -125,43 +116,31 @@ pub fn authenticate_impl(
         tokio::pin!(fprint_fut);
 
         let mut prompt_check = tokio::time::interval(Duration::from_millis(15));
-        let mut fprint_active = true;
 
         loop {
             tokio::select! {
-                fprint_res = &mut fprint_fut, if fprint_active => {
-                    match fprint_res {
-                        FprintOutcome::Matched => {
-                            log_debug(config.debug, "Fingerprint matched! Cancelling prompt and succeeding.");
-                            prompt_handle.cancel();
-                            return PamReturnCode::Success;
-                        }
-                        FprintOutcome::ExceededTries | FprintOutcome::TimedOut | FprintOutcome::DeviceError => {
-                            log_debug(config.debug, "Fingerprint authentication ended, waiting for password");
-                            fprint_active = false;
-                        }
-                        FprintOutcome::Cancelled => {
-                            fprint_active = false;
-                        }
+                fprint_res = &mut fprint_fut => match fprint_res {
+                    FprintOutcome::Matched => {
+                        log_debug(config.debug, "Fingerprint matched! Cancelling prompt and succeeding.");
+                        prompt_handle.cancel();
+                        return PamReturnCode::Success;
                     }
-                }
+                    _ => {
+                        log_debug(config.debug, "Fingerprint authentication ended, waiting for password");
+                        break;
+                    }
+                },
                 _ = prompt_check.tick() => {
                     if let Ok(res) = prompt_handle.rx.try_recv() {
                         let _ = cancel_tx.send(());
-                        if fprint_active {
-                            let _ = fprint_fut.await;
-                        }
+                        let _ = fprint_fut.await;
                         return handle_prompt_result(pamh_ptr, res, config.debug);
                     }
                 }
             }
-
-            if !fprint_active {
-                break;
-            }
         }
 
-        // If fingerprint attempts were exhausted, wait synchronously for password
+        // If fingerprint attempts ended without match, wait for user password
         match prompt_handle.rx.recv() {
             Ok(res) => handle_prompt_result(pamh_ptr, res, config.debug),
             Err(_) => PamReturnCode::Auth_Err,

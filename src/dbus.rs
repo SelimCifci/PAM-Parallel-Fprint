@@ -15,7 +15,6 @@ use crate::log::log_debug;
 )]
 pub trait FprintManager {
     fn get_default_device(&self) -> zbus::Result<OwnedObjectPath>;
-    fn get_devices(&self) -> zbus::Result<Vec<OwnedObjectPath>>;
 }
 
 #[proxy(
@@ -31,9 +30,6 @@ pub trait FprintDevice {
 
     #[zbus(signal)]
     fn verify_status(&self, result: &str, done: bool) -> zbus::Result<()>;
-
-    #[zbus(signal)]
-    fn verify_finger_selected(&self, finger_name: &str) -> zbus::Result<()>;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -46,98 +42,54 @@ pub enum FprintOutcome {
 }
 
 /// Upfront check for fast bypass (PAM_IGNORE).
-/// Returns Some((Connection, OwnedObjectPath)) if a fingerprint device exists
-/// and the specified user has at least one fingerprint enrolled.
 pub async fn check_device_and_prints(
     username: &str,
     debug: bool,
 ) -> Option<(Connection, OwnedObjectPath)> {
-    log_debug(debug, &format!("Checking fprintd for user '{}'", username));
-
-    let connection = match Connection::system().await {
-        Ok(c) => c,
-        Err(e) => {
-            log_debug(debug, &format!("Failed to connect to system D-Bus: {}", e));
-            return None;
-        }
-    };
-
-    let manager = match FprintManagerProxy::new(&connection).await {
-        Ok(m) => m,
-        Err(e) => {
-            log_debug(
-                debug,
-                &format!("Failed to connect to Fprint Manager: {}", e),
-            );
-            return None;
-        }
-    };
-
-    let device_path = match manager.get_default_device().await {
-        Ok(p) => p,
-        Err(e) => {
-            log_debug(debug, &format!("No default fprint device found: {}", e));
-            return None;
-        }
-    };
-
-    let device = match FprintDeviceProxy::builder(&connection)
-        .path(&device_path)
+    log_debug(debug, &format!("Checking fprintd for user '{username}'"));
+    let conn = Connection::system().await.ok()?;
+    let mgr = FprintManagerProxy::new(&conn).await.ok()?;
+    let dev_path = mgr.get_default_device().await.ok()?;
+    let dev = FprintDeviceProxy::builder(&conn)
+        .path(&dev_path)
         .build()
         .await
-    {
-        Ok(d) => d,
-        Err(e) => {
-            log_debug(debug, &format!("Failed to connect to device proxy: {}", e));
-            return None;
-        }
-    };
+        .ok()?;
 
-    let mut fingers_res = device.list_enrolled_fingers(username).await;
-    for attempt in 1..=3 {
-        if let Err(ref e) = fingers_res
-            && is_device_busy_error(e)
-        {
-            log_debug(
-                debug,
-                &format!(
-                    "fprintd is busy during enrolled fingers check (attempt {}/3); retrying in 200ms...",
-                    attempt
-                ),
-            );
+    let mut fingers_res = dev.list_enrolled_fingers(username).await;
+    for _ in 1..=3 {
+        if fingers_res.as_ref().err().is_some_and(is_device_busy_error) {
             sleep(Duration::from_millis(200)).await;
-            fingers_res = device.list_enrolled_fingers(username).await;
-            continue;
+            fingers_res = dev.list_enrolled_fingers(username).await;
+        } else {
+            break;
         }
-        break;
     }
 
     match fingers_res {
         Ok(fingers) if !fingers.is_empty() => {
             log_debug(
                 debug,
-                &format!("User '{}' has enrolled fingers: {:?}", username, fingers),
+                &format!("User '{username}' has enrolled fingers: {fingers:?}"),
             );
-            Some((connection, device_path))
+            Some((conn, dev_path))
         }
-        Ok(_) => {
-            log_debug(
-                debug,
-                &format!("User '{}' has 0 enrolled fingers", username),
-            );
-            None
-        }
-        Err(e) => {
-            log_debug(
-                debug,
-                &format!(
-                    "No enrolled fingers for user '{}' (or error: {})",
-                    username, e
-                ),
-            );
+        _ => {
+            log_debug(debug, &format!("No enrolled fingers for user '{username}'"));
             None
         }
     }
+}
+
+async fn try_start_verify(dev: &FprintDeviceProxy<'_>) -> zbus::Result<()> {
+    for _ in 0..3 {
+        match dev.verify_start("any").await {
+            Ok(()) => return Ok(()),
+            Err(e) if is_device_busy_error(&e) => sleep(Duration::from_millis(100)).await,
+            Err(e) => return Err(e),
+        }
+    }
+    dev.verify_start("any").await
 }
 
 /// Runs asynchronous fingerprint verification, listening for signals.
@@ -152,113 +104,35 @@ pub async fn run_fprint_verification(
     debug: bool,
     mut cancel_rx: oneshot::Receiver<()>,
 ) -> FprintOutcome {
-    let device = match FprintDeviceProxy::builder(connection)
+    let Ok(device) = FprintDeviceProxy::builder(connection)
         .path(device_path)
         .build()
         .await
-    {
-        Ok(d) => d,
-        Err(e) => {
-            log_debug(debug, &format!("Failed to build device proxy: {}", e));
-            return FprintOutcome::DeviceError;
-        }
+    else {
+        log_debug(debug, "Failed to build device proxy");
+        return FprintOutcome::DeviceError;
     };
 
     let timeout_fut = sleep(Duration::from_secs(timeout_secs));
     tokio::pin!(timeout_fut);
 
-    let mut claimed = false;
-    let mut busy_logged = false;
-    const RETRY_INTERVAL: Duration = Duration::from_millis(250);
-
     // 1. Acquire device claim and start verification with graceful retry on busy
     let mut status_stream = loop {
         log_debug(debug, "Claiming fingerprint device");
-        match device.claim(username).await {
-            Ok(()) => {
-                if busy_logged {
-                    log_debug(
-                        debug,
-                        "Fingerprint device acquired successfully after previous busy state",
-                    );
-                }
-                claimed = true;
-
-                // Subscribe to verify status before calling verify_start to ensure no signals are dropped
-                let stream = match device.receive_verify_status().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        log_debug(
-                            debug,
-                            &format!("Failed to subscribe to verify status: {}", e),
-                        );
-                        let _ = device.release().await;
-                        return FprintOutcome::DeviceError;
-                    }
-                };
-
+        if device.claim(username).await.is_ok() {
+            if let Ok(stream) = device.receive_verify_status().await {
                 log_debug(debug, "Starting fprint verification");
-                match device.verify_start("any").await {
-                    Ok(()) => {
-                        break stream;
-                    }
-                    Err(e) => {
-                        let _ = device.release().await;
-                        claimed = false;
-                        if is_device_busy_error(&e) {
-                            if !busy_logged {
-                                log_debug(
-                                    debug,
-                                    &format!(
-                                        "Fingerprint device busy during verify_start ({}). Retrying gracefully in background...",
-                                        e
-                                    ),
-                                );
-                                busy_logged = true;
-                            }
-                        } else {
-                            log_debug(debug, &format!("Failed to start verification: {}", e));
-                            return FprintOutcome::DeviceError;
-                        }
-                    }
+                if try_start_verify(&device).await.is_ok() {
+                    break stream;
                 }
             }
-            Err(e) => {
-                if is_device_busy_error(&e) {
-                    if !busy_logged {
-                        log_debug(
-                            debug,
-                            &format!(
-                                "Fingerprint device is busy with another request ({}). Retrying gracefully in background...",
-                                e
-                            ),
-                        );
-                        busy_logged = true;
-                    }
-                } else {
-                    log_debug(debug, &format!("Failed to claim fingerprint device: {}", e));
-                    return FprintOutcome::DeviceError;
-                }
-            }
+            let _ = device.release().await;
         }
 
-        // Wait before retrying, remaining fully responsive to cancel (password entry) and timeout
         tokio::select! {
-            _ = &mut cancel_rx => {
-                log_debug(debug, "fprintd verification cancelled while waiting for busy device");
-                if claimed {
-                    let _ = device.release().await;
-                }
-                return FprintOutcome::Cancelled;
-            }
-            _ = &mut timeout_fut => {
-                log_debug(debug, "fprintd verification timed out while waiting for busy device");
-                if claimed {
-                    let _ = device.release().await;
-                }
-                return FprintOutcome::TimedOut;
-            }
-            _ = sleep(RETRY_INTERVAL) => {}
+            _ = &mut cancel_rx => return FprintOutcome::Cancelled,
+            _ = &mut timeout_fut => return FprintOutcome::TimedOut,
+            _ = sleep(Duration::from_millis(250)) => {}
         }
     };
 
@@ -275,22 +149,12 @@ pub async fn run_fprint_verification(
                 break FprintOutcome::TimedOut;
             }
             signal_opt = status_stream.next() => {
-                let signal = match signal_opt {
-                    Some(s) => s,
-                    None => {
-                        log_debug(debug, "VerifyStatus stream closed");
-                        break FprintOutcome::DeviceError;
-                    }
+                let Some(signal) = signal_opt else {
+                    log_debug(debug, "VerifyStatus stream closed");
+                    break FprintOutcome::DeviceError;
                 };
 
-                let args = match signal.args() {
-                    Ok(a) => a,
-                    Err(e) => {
-                        log_debug(debug, &format!("Failed to parse signal args: {}", e));
-                        continue;
-                    }
-                };
-
+                let Ok(args) = signal.args() else { continue };
                 log_debug(
                     debug,
                     &format!("fprintd status: result='{}', done={}", args.result, args.done),
@@ -303,48 +167,30 @@ pub async fn run_fprint_verification(
                     }
                     "verify-no-match" => {
                         tries += 1;
-                        log_debug(debug, &format!("Fingerprint mismatch (attempt {}/{})", tries, max_tries));
+                        log_debug(debug, &format!("Fingerprint mismatch (attempt {tries}/{max_tries})"));
                         if tries >= max_tries || args.done {
                             break FprintOutcome::ExceededTries;
                         }
                     }
-                    _ => {
-                        // Intermediate state (retry scan, swipe too short, etc.)
-                        if args.done {
-                            tries += 1;
-                            if tries >= max_tries {
-                                break FprintOutcome::ExceededTries;
-                            }
-                            // If done was true, re-arm verify_start for remaining tries
-                            let mut rearmed = false;
-                            for _ in 0..3 {
-                                match device.verify_start("any").await {
-                                    Ok(()) => {
-                                        rearmed = true;
-                                        break;
-                                    }
-                                    Err(e) if is_device_busy_error(&e) => {
-                                        sleep(Duration::from_millis(100)).await;
-                                    }
-                                    Err(_) => break,
-                                }
-                            }
-                            if !rearmed {
-                                log_debug(debug, "Failed to re-arm verify_start after intermediate state");
-                                break FprintOutcome::DeviceError;
-                            }
+                    _ if args.done => {
+                        tries += 1;
+                        if tries >= max_tries {
+                            break FprintOutcome::ExceededTries;
+                        }
+                        if try_start_verify(&device).await.is_err() {
+                            log_debug(debug, "Failed to re-arm verify_start after intermediate state");
+                            break FprintOutcome::DeviceError;
                         }
                     }
+                    _ => {}
                 }
             }
         }
     };
 
-    if claimed {
-        log_debug(debug, "Stopping fprint verification and releasing device");
-        let _ = device.verify_stop().await;
-        let _ = device.release().await;
-    }
+    log_debug(debug, "Stopping fprint verification and releasing device");
+    let _ = device.verify_stop().await;
+    let _ = device.release().await;
 
     outcome
 }
@@ -352,41 +198,21 @@ pub async fn run_fprint_verification(
 /// Returns true if the D-Bus error indicates that the fingerprint device is
 /// currently busy with another operation or claimed by another process.
 pub fn is_device_busy_error(err: &zbus::Error) -> bool {
-    if let zbus::Error::MethodError(name, desc, _) = err {
-        let name_str = name.as_str();
-        if name_str == "net.reactivated.Fprint.Error.AlreadyInUse"
-            || name_str == "net.reactivated.Fprint.Error.ClaimDevice"
-            || name_str == "net.reactivated.Fprint.Error.DeviceBusy"
-            || name_str.ends_with(".AlreadyInUse")
-            || name_str.ends_with(".ClaimDevice")
-            || name_str.ends_with(".DeviceBusy")
-        {
-            return true;
-        }
-        if let Some(msg) = desc {
-            let msg_lower = msg.to_lowercase();
-            if msg_lower.contains("already")
-                || msg_lower.contains("busy")
-                || msg_lower.contains("in use")
-                || msg_lower.contains("in-use")
-                || msg_lower.contains("already open")
-                || msg_lower.contains("already claimed")
-            {
-                return true;
-            }
-        }
-    }
+    let check_str = |s: &str| {
+        let l = s.to_ascii_lowercase();
+        l.contains("already") || l.contains("busy") || l.contains("in use") || l.contains("in-use")
+    };
 
-    let err_str = err.to_string().to_lowercase();
-    err_str.contains("alreadyinuse")
-        || err_str.contains("devicebusy")
-        || err_str.contains("already claimed")
-        || err_str.contains("already open")
-        || err_str.contains("already being used")
-        || err_str.contains("device is busy")
-        || err_str.contains("busy with another")
-        || err_str.contains("in use")
-        || err_str.contains("device was not claimed before use")
+    match err {
+        zbus::Error::MethodError(name, desc, _) => {
+            let n = name.as_str();
+            n.ends_with(".AlreadyInUse")
+                || n.ends_with(".ClaimDevice")
+                || n.ends_with(".DeviceBusy")
+                || desc.as_deref().is_some_and(check_str)
+        }
+        _ => check_str(&err.to_string()),
+    }
 }
 
 #[cfg(test)]

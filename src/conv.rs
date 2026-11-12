@@ -30,11 +30,8 @@ impl TtyState {
             }
 
             let mut termios: libc::termios = std::mem::zeroed();
-            if is_tty {
-                let rc = libc::tcgetattr(fd, &mut termios);
-                if rc != 0 {
-                    is_tty = false;
-                }
+            if is_tty && libc::tcgetattr(fd, &mut termios) != 0 {
+                is_tty = false;
             }
 
             Self {
@@ -56,8 +53,7 @@ impl TtyState {
     pub fn print_newline(&self) {
         if self.is_tty {
             unsafe {
-                let nl = c"\n";
-                let _ = libc::write(self.fd, nl.as_ptr() as *const libc::c_void, 1);
+                let _ = libc::write(self.fd, c"\n".as_ptr() as *const libc::c_void, 1);
             }
         }
     }
@@ -82,6 +78,8 @@ struct PromptContext {
 extern "C" fn prompt_worker_c(arg: *mut libc::c_void) -> *mut libc::c_void {
     let ctx = unsafe { Box::from_raw(arg as *mut PromptContext) };
     let conv = unsafe { &*ctx.conv_ptr };
+    let mut result = PromptResult::Error;
+
     if let Some(conv_fn) = conv.conv {
         let msg = pam::ffi::pam_message {
             msg_style: pam::ffi::PAM_PROMPT_ECHO_OFF,
@@ -93,40 +91,30 @@ extern "C" fn prompt_worker_c(arg: *mut libc::c_void) -> *mut libc::c_void {
         let rc = unsafe {
             conv_fn(
                 1,
-                &msg_ptr as *const *const pam::ffi::pam_message
-                    as *mut *const pam::ffi::pam_message,
+                &msg_ptr as *const *const _ as *mut *const _,
                 &mut resp_ptr,
                 conv.appdata_ptr,
             )
         };
 
         if rc == pam::ffi::PAM_SUCCESS && !resp_ptr.is_null() {
-            let resp = unsafe { *resp_ptr };
-            let result = if !resp.resp.is_null() {
-                let bytes = unsafe { CStr::from_ptr(resp.resp) }.to_bytes().to_vec();
-                PromptResult::Password(bytes)
-            } else {
-                PromptResult::Password(Vec::new())
-            };
-
-            // Securely free PAM response buffers
             unsafe {
-                if !(*resp_ptr).resp.is_null() {
-                    let len = libc::strlen((*resp_ptr).resp);
-                    libc::memset((*resp_ptr).resp as *mut libc::c_void, 0, len);
-                    libc::free((*resp_ptr).resp as *mut libc::c_void);
-                }
-                libc::free(resp_ptr as *mut libc::c_void);
+                let resp = *resp_ptr;
+                let bytes = if !resp.resp.is_null() {
+                    let b = CStr::from_ptr(resp.resp).to_bytes().to_vec();
+                    libc::memset(resp.resp as *mut _, 0, libc::strlen(resp.resp));
+                    libc::free(resp.resp as *mut _);
+                    b
+                } else {
+                    Vec::new()
+                };
+                libc::free(resp_ptr as *mut _);
+                result = PromptResult::Password(bytes);
             }
-
-            let _ = ctx.sender.send(result);
-        } else {
-            let _ = ctx.sender.send(PromptResult::Error);
         }
-    } else {
-        let _ = ctx.sender.send(PromptResult::Error);
     }
 
+    let _ = ctx.sender.send(result);
     std::ptr::null_mut()
 }
 
@@ -141,8 +129,7 @@ impl PromptHandle {
         if self.tid != 0 {
             unsafe {
                 libc::pthread_cancel(self.tid);
-                let mut retval: *mut libc::c_void = std::ptr::null_mut();
-                libc::pthread_join(self.tid, &mut retval);
+                libc::pthread_join(self.tid, std::ptr::null_mut());
             }
             self.tid = 0;
         }
@@ -156,8 +143,7 @@ impl Drop for PromptHandle {
     fn drop(&mut self) {
         if self.tid != 0 {
             unsafe {
-                let mut retval: *mut libc::c_void = std::ptr::null_mut();
-                libc::pthread_join(self.tid, &mut retval);
+                libc::pthread_join(self.tid, std::ptr::null_mut());
             }
             self.tid = 0;
         }
@@ -200,7 +186,7 @@ pub fn spawn_prompt_thread(
     } else {
         log_debug(
             debug,
-            &format!("Failed to spawn POSIX prompt thread: rc={}", rc),
+            &format!("Failed to spawn POSIX prompt thread: rc={rc}"),
         );
         None
     }
@@ -278,7 +264,6 @@ mod tests {
         let handle = spawn_prompt_thread(&conv, "Password: ".to_string(), false).unwrap();
         std::thread::sleep(Duration::from_millis(30));
 
-        // Now cancel it - should unblock immediately without hanging!
         handle.cancel();
 
         unsafe {

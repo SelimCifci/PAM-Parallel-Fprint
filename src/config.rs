@@ -25,18 +25,17 @@ impl ModuleConfig {
 
         for arg in args {
             if let Ok(s) = arg.to_str() {
-                let trimmed = s.trim();
-                if trimmed == "debug" {
+                let s = s.trim();
+                if s == "debug" {
                     config.debug = true;
-                } else if let Some(val) = trimmed.strip_prefix("prompt=") {
-                    let unquoted = val.trim_matches('"').trim_matches('\'');
-                    config.prompt = unquoted.to_string();
-                } else if let Some(val) = trimmed.strip_prefix("max_tries=")
+                } else if let Some(val) = s.strip_prefix("prompt=") {
+                    config.prompt = val.trim_matches(['"', '\'']).to_string();
+                } else if let Some(val) = s.strip_prefix("max_tries=")
                     && let Ok(n) = val.parse::<u32>()
                     && n > 0
                 {
                     config.max_tries = n;
-                } else if let Some(val) = trimmed.strip_prefix("timeout=")
+                } else if let Some(val) = s.strip_prefix("timeout=")
                     && let Ok(n) = val.parse::<u64>()
                     && n > 0
                 {
